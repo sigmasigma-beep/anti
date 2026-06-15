@@ -49,8 +49,8 @@ public class Playfablogin : MonoBehaviourPunCallbacks
     public List<CosmeticScanRule> scanRules = new List<CosmeticScanRule>();
 
     [Header("SCAN PERFORMANCE")]
-    [Tooltip("How often the big scan runs, in seconds.")]
-    [SerializeField] private float periodicScanInterval = 60f;
+    [Tooltip("How often the lightweight GameObject scan runs after the initial Photon-connected check, in seconds.")]
+    [SerializeField] private float periodicScanInterval = 300f;
 
     [Tooltip("How many child objects to process before yielding during a scan.")]
     [SerializeField] private int childrenPerYield = 16;
@@ -118,6 +118,8 @@ public class Playfablogin : MonoBehaviourPunCallbacks
     private bool _inventoryRequestInProgress;
     private bool _currencyRequestInProgress;
     private bool _scanRequested;
+    private bool _fullConnectionCheckCompleted;
+    private bool _connectionCheckInProgress;
     private Coroutine _scanLoopRoutine;
 
     private void Awake()
@@ -142,10 +144,14 @@ public class Playfablogin : MonoBehaviourPunCallbacks
         StopScanLoop();
     }
 
+    public override void OnConnectedToMaster()
+    {
+        RequestPhotonConnectionCheck();
+    }
+
     public override void OnJoinedRoom()
     {
-        if (_snapshotReady)
-            BroadcastRoleToPhoton();
+        RequestPhotonConnectionCheck();
     }
 
     private void Login()
@@ -251,8 +257,7 @@ public class Playfablogin : MonoBehaviourPunCallbacks
         AntiCheatReady = true;
         _snapshotReady = true;
 
-        RequestScan();
-        StartScanLoop();
+        RequestPhotonConnectionCheck();
     }
 
     private void ResetRoles()
@@ -348,10 +353,44 @@ public class Playfablogin : MonoBehaviourPunCallbacks
 
     public void RequestScan()
     {
-        if (!AntiCheatReady || !_snapshotReady)
+        if (!AntiCheatReady || !_snapshotReady || !_fullConnectionCheckCompleted)
             return;
 
         _scanRequested = true;
+    }
+
+    private void RequestPhotonConnectionCheck()
+    {
+        if (!AntiCheatReady || !_snapshotReady)
+            return;
+
+        if (!PhotonNetwork.IsConnected)
+            return;
+
+        if (_fullConnectionCheckCompleted)
+        {
+            BroadcastRoleToPhoton();
+            return;
+        }
+
+        if (_connectionCheckInProgress)
+            return;
+
+        _connectionCheckInProgress = true;
+        StartCoroutine(RunPhotonConnectionCheck());
+    }
+
+    private IEnumerator RunPhotonConnectionCheck()
+    {
+        CheckQuestVersion();
+        BroadcastRoleToPhoton();
+        ValidateCosmetics();
+        yield return ScanHierarchy();
+
+        _connectionCheckInProgress = false;
+        _fullConnectionCheckCompleted = true;
+        _scanRequested = false;
+        StartScanLoop();
     }
 
     private void StartScanLoop()
@@ -375,25 +414,21 @@ public class Playfablogin : MonoBehaviourPunCallbacks
     {
         while (_snapshotReady)
         {
-            yield return RunFullValidationScan();
-
-            _scanRequested = false;
-
             float elapsed = 0f;
             while (elapsed < periodicScanInterval && !_scanRequested && _snapshotReady)
             {
                 elapsed += 1f;
                 yield return new WaitForSecondsRealtime(1f);
             }
+
+            if (!_snapshotReady)
+                break;
+
+            yield return ScanHierarchy();
+            _scanRequested = false;
         }
 
         _scanLoopRoutine = null;
-    }
-
-    private IEnumerator RunFullValidationScan()
-    {
-        ValidateCosmetics();
-        yield return ScanHierarchy();
     }
 
     private void ValidateCosmetics()
@@ -446,7 +481,7 @@ public class Playfablogin : MonoBehaviourPunCallbacks
                     if (!GrantedItems.Contains(rule.requiredPlayFabItemID))
                     {
                         string playerName = PlayerPrefs.GetString("Username", "Unknown");
-                        Debug.LogError("[SCANNER] VIOLATION — " + child.name + " active but '" + rule.requiredPlayFabItemID + "' not owned by " + MyPlayFabID);
+                        Debug.LogError("[SCANNER] VIOLATION Â— " + child.name + " active but '" + rule.requiredPlayFabItemID + "' not owned by " + MyPlayFabID);
 
                         if (!string.IsNullOrEmpty(violationWebhookURL))
                         {
@@ -476,7 +511,6 @@ public class Playfablogin : MonoBehaviourPunCallbacks
     public void SetEquippedCosmetic(string category, string cosmetic)
     {
         EquippedCosmetics[category] = cosmetic;
-        RequestScan();
     }
 
     public bool IsCosmeticAllowed(string cosmeticName)
@@ -681,19 +715,17 @@ public class CosmeticHierarchyWatcher : MonoBehaviour
 
     private void OnTransformChildrenChanged()
     {
-        if (manager != null)
-            manager.RequestScan();
+        // Photon/player prefab hierarchy changes can fire this repeatedly and cause frame spikes.
+        // The manager performs the big connection check once and then periodic GameObject checks.
     }
 
     private void OnTransformParentChanged()
     {
-        if (manager != null)
-            manager.RequestScan();
+        // Intentionally no immediate scan; periodic checks handle GameObject validation.
     }
 
     private void OnEnable()
     {
-        if (manager != null)
-            manager.RequestScan();
+        // Intentionally no immediate scan; periodic checks handle GameObject validation.
     }
 }
