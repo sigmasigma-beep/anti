@@ -56,11 +56,13 @@ public class LeaderBoard : MonoBehaviourPunCallbacks
     private const float ReportCooldown = 30f;
 
     private float _lastCacheTime = -999f;
+    private float _lastPvrCacheRefreshTime = -999f;
     private const float CacheInterval = 60f;
+    private const float PvrCacheRefreshCooldown = 5f;
     private bool _cacheDirty = true;
     private bool _rebuildQueued;
 
-   private MaterialPropertyBlock _mpb;
+    private MaterialPropertyBlock _mpb;
 
     private string[] _lastNames = Array.Empty<string>();
     private string[] _lastRoles = Array.Empty<string>();
@@ -94,11 +96,10 @@ public class LeaderBoard : MonoBehaviourPunCallbacks
 
     private void Awake()
     {
-    _photonView = GetComponent<PhotonView>();
+        _photonView = GetComponent<PhotonView>();
+        _mpb = new MaterialPropertyBlock();
 
-    _mpb = new MaterialPropertyBlock();
-
-    EnsureCacheArrays();
+        EnsureCacheArrays();
     }
 
     private void Start()
@@ -230,11 +231,15 @@ public class LeaderBoard : MonoBehaviourPunCallbacks
             _actorToSlot[p.ActorNumber] = _orderedPlayers.Count - 1;
         }
 
-        RefreshPhotonVRCache();
+        RefreshPhotonVRCache(true);
     }
 
-    private void RefreshPhotonVRCache()
+    private void RefreshPhotonVRCache(bool force = false)
     {
+        if (!force && Time.time - _lastPvrCacheRefreshTime < PvrCacheRefreshCooldown)
+            return;
+
+        _lastPvrCacheRefreshTime = Time.time;
         _cachedPVRPlayers = FindObjectsOfType<PhotonVRPlayer>();
         _pvrByActor.Clear();
 
@@ -253,6 +258,34 @@ public class LeaderBoard : MonoBehaviourPunCallbacks
 
             _pvrByActor[view.Owner.ActorNumber] = pvr;
         }
+    }
+
+    private Player GetPlayerBySlot(int index)
+    {
+        if (index < 0)
+            return null;
+
+        if (_cacheDirty)
+            ForceRebuild();
+
+        if (index >= _orderedPlayers.Count)
+            return null;
+
+        return _orderedPlayers[index];
+    }
+
+    private bool TryGetPvrForPlayer(Player player, out PhotonVRPlayer pvr)
+    {
+        pvr = null;
+
+        if (player == null)
+            return false;
+
+        if (_pvrByActor.TryGetValue(player.ActorNumber, out pvr) && pvr != null)
+            return true;
+
+        RefreshPhotonVRCache();
+        return _pvrByActor.TryGetValue(player.ActorNumber, out pvr) && pvr != null;
     }
 
     private void RefreshAllUI()
@@ -414,15 +447,11 @@ public class LeaderBoard : MonoBehaviourPunCallbacks
 
     public void MutePress(int index)
     {
-        Player[] players = PhotonNetwork.PlayerList;
-        if (players == null || index < 0 || index >= players.Length)
-            return;
-
-        Player target = players[index];
+        Player target = GetPlayerBySlot(index);
         if (target == null)
             return;
 
-        if (_pvrByActor.TryGetValue(target.ActorNumber, out PhotonVRPlayer pvrp) && pvrp != null)
+        if (TryGetPvrForPlayer(target, out PhotonVRPlayer pvrp))
         {
             PhotonVoiceView voice = pvrp.GetComponent<PhotonVoiceView>();
             if (voice != null && voice.SpeakerInUse != null)
@@ -445,25 +474,21 @@ public class LeaderBoard : MonoBehaviourPunCallbacks
         if (!Playfablogin.CanKick())
             return;
 
-        Player[] players = PhotonNetwork.PlayerList;
-        if (players == null || index < 0 || index >= players.Length)
-            return;
-
-        Player target = players[index];
+        Player target = GetPlayerBySlot(index);
         if (target == null || target.IsLocal)
             return;
 
         string targetRole = GetProp(target, "Role", "Player");
         if (!Playfablogin.CanKickRole(targetRole))
         {
-            Debug.LogWarning("[KICK] Blocked — target role equal or higher: " + targetRole);
+        if (!TryGetPvrForPlayer(target, out PhotonVRPlayer pvr))
             return;
         }
 
         string targetPlayFabId = GetProp(target, "PlayfabID", string.Empty);
         if (string.IsNullOrEmpty(targetPlayFabId))
         {
-            Debug.LogWarning("[KICK] Target has no PlayFab ID in properties — cannot verify.");
+            Debug.LogWarning("[KICK] Target has no PlayFab ID in properties Â— cannot verify.");
             return;
         }
 
@@ -499,7 +524,7 @@ public class LeaderBoard : MonoBehaviourPunCallbacks
 
         if (actualSenderPlayfabId != senderPlayfabId)
         {
-            Debug.LogWarning("[KICK RPC] Spoofed sender PlayFab ID — rejected.");
+            Debug.LogWarning("[KICK RPC] Spoofed sender PlayFab ID Â— rejected.");
             return;
         }
 
@@ -533,7 +558,7 @@ public class LeaderBoard : MonoBehaviourPunCallbacks
 
             if (json.Contains("\"approved\":true"))
             {
-                Debug.Log("[KICK RPC] Server approved kick — disconnecting.");
+                Debug.Log("[KICK RPC] Server approved kick Â— disconnecting.");
                 if (PhotonNetwork.IsConnected)
                     PhotonNetwork.Disconnect();
             }
@@ -556,12 +581,8 @@ public class LeaderBoard : MonoBehaviourPunCallbacks
 
         if (Time.time - _lastReportTime < ReportCooldown)
         {
-            Debug.LogWarning("[REPORT] Cooldown active — wait before reporting again.");
-            return;
-        }
-
-        Player[] players = PhotonNetwork.PlayerList;
-        if (players == null || index < 0 || index >= players.Length)
+        Player target = GetPlayerBySlot(index);
+        if (TryGetPvrForPlayer(target, out PhotonVRPlayer pvrp))
             return;
 
         Player target = players[index];
